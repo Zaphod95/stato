@@ -1,0 +1,4 @@
+# Excel e qualsiasi dato: mai nel repository
+*.xlsx
+*.xls
+*.csv
