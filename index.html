@@ -135,10 +135,12 @@ body.blur .sens{filter:blur(8px);user-select:none}
 
     <div class="card" style="margin-bottom:12px">
       <h2>Andamento patrimonio
-        <span class="legend"><span><i style="background:var(--accent)"></i>Totale con investimenti</span></span>
+        <span class="legend"><span><i style="background:var(--accent)"></i>Totale con investimenti</span>
+        <label id="pens-wrap" style="cursor:pointer"><input type="checkbox" id="pens" checked style="vertical-align:-2px"> stima fondo pensione</label></span>
       </h2>
       <div class="sens" id="worth"></div>
       <div class="readout sens" id="worth-r">Tocca il grafico per i dettagli</div>
+      <div class="note sens" id="worth-n"></div>
     </div>
 
     <div class="grid two">
@@ -160,6 +162,11 @@ body.blur .sens{filter:blur(8px);user-select:none}
       </div>
     </div>
   </main>
+
+  <footer class="note" style="margin-top:24px;text-align:center;line-height:1.6">
+    Riepilogo privato di un file Excel: tutto viene elaborato sul tuo dispositivo, nessun dato lascia il browser.<br>
+    <a href="https://github.com/Zaphod95/stato" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Codice sorgente su GitHub</a>
+  </footer>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -285,15 +292,39 @@ function parse(wb){
         return;
       }
       // colonne: data | investimento mese | investito tot | conto titoli
-      let last = null;
+      let last = null, first = null;
       for (const r of ir.slice(2)){
         const val = num(r[ci+3]), tot = num(r[ci+2]);
-        if (val != null) last = {date:r[ci], tot, val};
+        if (val != null){ last = {date:r[ci], tot, val}; if (!first) first = last; }
       }
-      if (last) invest.push({name: name.charAt(0) + name.slice(1).toLowerCase(), ...last});
+      if (last) invest.push({name: name.charAt(0) + name.slice(1).toLowerCase(), ...last, first});
     });
   }
-  return {months, monthSheets, invest, bonds, accCols};
+  const pension = estimatePension(months, invest);
+  return {months, monthSheets, invest, bonds, accCols, pension};
+}
+
+/* ---------- stima del fondo pensione per i mesi prima che fosse registrato ----------
+   Modello: versamenti mensili costanti (quota propria + TFR/azienda) dall'avvio del fondo
+   al primo valore registrato, con un rendimento annuo costante. Il versamento mensile è
+   calcolato in modo che il valore stimato coincida con il primo valore reale del file. */
+const PENSION = { start: {y:2023, m:7}, annualReturn: 0.04 };
+function estimatePension(months, invest){
+  months.forEach(g => { g.pens = 0; g.netAdj = g.net; });
+  const f = invest.find(x => /pension/i.test(x.name));
+  if (!f || !f.first || !(f.first.date instanceof Date)) return null;
+  const fy = f.first.date.getFullYear(), fm = f.first.date.getMonth() + 1;
+  const idx = (y, m) => (y - PENSION.start.y) * 12 + (m - PENSION.start.m);   // 0 = mese di avvio
+  const N = idx(fy, fm);
+  if (N <= 0) return null;
+  const r = Math.pow(1 + PENSION.annualReturn, 1/12) - 1;
+  const S = n => r ? (Math.pow(1 + r, n + 1) - 1) / r : n + 1;   // valore di 1 €/mese dopo n+1 versamenti
+  const K = f.first.val / S(N);
+  months.forEach(g => {
+    const j = idx(g.y, g.m);
+    if (j >= 0 && j < N){ g.pens = K * S(j); if (g.net != null) g.netAdj = g.net + g.pens; }
+  });
+  return { monthly: K, own: f.first.tot != null ? f.first.tot / (N + 1) : null, firstY: fy, firstM: fm, value: f.first.val };
 }
 
 /* ---------- rendering ---------- */
@@ -320,7 +351,7 @@ function render(){
     $('k-inv-d').innerHTML = d({inv:lastBal.inv||0}, prevBal && {...prevBal, inv:prevBal.inv||0}, 'inv');
     const yearAgo = withBal.find(g => g.k >= lastBal.k - 100);
     if (yearAgo && yearAgo !== lastBal){
-      const x = lastBal.net - yearAgo.net;
+      const x = lastBal.net - yearAgo.netAdj;
       $('k-net-d').innerHTML += `<br><span class="${x>=0?'pos':'neg'}">${sgn(x)}</span> vs ${label(yearAgo.y,yearAgo.m)}`;
     }
   }
@@ -480,12 +511,18 @@ function drawFlow(){
   $('flow').replaceChildren(svg);
 }
 $('range').addEventListener('change', drawFlow);
+$('pens').addEventListener('change', drawWorth);
 
 function drawWorth(){
-  const data = state.months.filter(g => g.net != null);
+  const P = state.pension, est = !!P && $('pens').checked;
+  $('pens-wrap').classList.toggle('hidden', !P);
+  const data = state.months.filter(g => g.net != null).map(g => ({...g, v: est ? g.netAdj : g.net, e: est && g.pens > 0}));
   if (data.length < 2){ $('worth').textContent = 'Dati insufficienti'; return; }
+  $('worth-n').textContent = !P ? '' : est
+    ? `Linea tratteggiata = stima: al patrimonio registrato si aggiunge il valore stimato del fondo pensione da ${MESI_L[PENSION.start.m-1].toLowerCase()} ${PENSION.start.y}, ipotizzando versamenti costanti di circa ${fmt(P.monthly)}/mese (di cui circa ${fmt(P.own)} tuoi, il resto TFR/azienda) e un rendimento del ${Math.round(PENSION.annualReturn*100)}% annuo, in modo da arrivare ai ${fmt(P.value)} registrati a ${MESI_L[P.firstM-1].toLowerCase()} ${P.firstY}.`
+    : `Senza stima: il fondo pensione compare solo da ${MESI_L[P.firstM-1].toLowerCase()} ${P.firstY}, da qui il salto.`;
   const W = 720, H = 220, L = 40, B = 22, T = 10;
-  const vals = data.map(g => g.net);
+  const vals = data.map(g => g.v);
   let lo = Math.min(...vals), hi = Math.max(...vals);
   const pad = (hi-lo)*0.1 || 1000; lo = Math.max(0, Math.floor((lo-pad)/5000)*5000); hi = Math.ceil((hi+pad)/5000)*5000;
   const X = i => L + (W-L) * i / (data.length-1);
@@ -496,12 +533,19 @@ function drawWorth(){
     svg.append(el('line', {x1:L, x2:W, y1:y, y2:y, stroke:'var(--line)'}));
     const t = el('text', {x:L-6, y:y+4, 'text-anchor':'end'}); t.textContent = kfmt(v); svg.append(t);
   }
-  const pts = data.map((g,i) => `${X(i)},${Y(g.net)}`).join(' ');
+  const pts = data.map((g,i) => `${X(i)},${Y(g.v)}`).join(' ');
   svg.append(el('polygon', {points:`${X(0)},${H-B} ${pts} ${X(data.length-1)},${H-B}`, fill:'var(--accent)', opacity:.08}));
-  svg.append(el('polyline', {points:pts, fill:'none', stroke:'var(--accent)', 'stroke-width':2, 'stroke-linejoin':'round'}));
+  // tratto stimato (tratteggiato) fino al primo mese reale, poi tratto reale (pieno)
+  const cut = data.findIndex(g => !g.e);
+  if (cut > 0){
+    const ePts = data.slice(0, cut + 1).map((g,i) => `${X(i)},${Y(g.v)}`).join(' ');
+    svg.append(el('polyline', {points:ePts, fill:'none', stroke:'var(--accent)', 'stroke-width':2, 'stroke-dasharray':'6 4', 'stroke-linejoin':'round'}));
+  }
+  const rPts = data.slice(Math.max(0, cut)).map((g,i) => `${X(i + Math.max(0, cut))},${Y(g.v)}`).join(' ');
+  svg.append(el('polyline', {points:rPts, fill:'none', stroke:'var(--accent)', 'stroke-width':2, 'stroke-linejoin':'round'}));
   const every = Math.ceil(data.length / 8);
-  data.forEach((g,i) => { if (i % every === 0 || i === data.length-1){ const t = el('text', {x:X(i), y:H-6, 'text-anchor':'middle'}); t.textContent = label(g.y,g.m); svg.append(t);} });
-  const dot = el('circle', {r:4, fill:'var(--accent)', stroke:'var(--card)', 'stroke-width':2, cx:X(data.length-1), cy:Y(data[data.length-1].net)});
+  data.forEach((g,i) => { if ((i % every === 0 && data.length-1-i >= every*0.7) || i === data.length-1){ const t = el('text', {x:X(i), y:H-6, 'text-anchor':'middle'}); t.textContent = label(g.y,g.m); svg.append(t);} });
+  const dot = el('circle', {r:4, fill:'var(--accent)', stroke:'var(--card)', 'stroke-width':2, cx:X(data.length-1), cy:Y(data[data.length-1].v)});
   svg.append(dot);
   const hit = el('rect', {x:L, y:0, width:W-L, height:H, fill:'transparent', style:'cursor:crosshair;touch-action:pan-y'});
   const pick = e => {
@@ -509,8 +553,8 @@ function drawWorth(){
     const x = (e.clientX - r.left) / r.width * W;
     const i = Math.max(0, Math.min(data.length-1, Math.round((x-L)/(W-L)*(data.length-1))));
     const g = data[i];
-    dot.setAttribute('cx', X(i)); dot.setAttribute('cy', Y(g.net));
-    $('worth-r').innerHTML = `<b>${MESI_L[g.m-1]} ${g.y}</b> · totale ${fmt(g.net)} · liquidità ${fmt(g.tot)}${g.inv ? ' · investimenti ' + fmt(g.inv) : ''}`;
+    dot.setAttribute('cx', X(i)); dot.setAttribute('cy', Y(g.v));
+    $('worth-r').innerHTML = `<b>${MESI_L[g.m-1]} ${g.y}</b> · totale ${fmt(g.v)}${g.e ? ' (stima)' : ''} · liquidità ${fmt(g.tot)}${g.inv ? ' · investimenti ' + fmt(g.inv) : ''}${g.e ? ' · fondo pensione stimato ' + fmt(g.pens) : ''}`;
   };
   hit.addEventListener('pointermove', pick); hit.addEventListener('click', pick);
   svg.append(hit);
