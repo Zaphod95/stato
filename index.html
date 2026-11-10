@@ -147,6 +147,12 @@ body.blur .sens{filter:blur(8px);user-select:none}
         <div class="bars sens" id="cats"></div>
         <div class="note sens" id="cats-note"></div>
       </div>
+      <div class="card" style="grid-column:1/-1">
+        <h2>Andamento per categoria <select id="csel"></select></h2>
+        <div class="sens" id="trend"></div>
+        <div class="readout sens" id="trend-r"></div>
+        <div class="note sens" id="trend-s"></div>
+      </div>
       <div class="card">
         <h2>Investimenti</h2>
         <table class="sens" id="invest"></table>
@@ -348,7 +354,17 @@ function render(){
   // selettore mesi categorie
   $('msel').innerHTML = monthSheets.map((s,i) => `<option value="${i}">${s.name}</option>`).join('');
   $('msel').onchange = drawCats;
+  // indice categorie per l'andamento mensile (nomi uniti senza distinzione maiuscole/spazi)
+  const asc = [...monthSheets].sort((a,b) => a.k-b.k);
+  const names = new Map();
+  asc.forEach(s => s.out.forEach(x => { const k = catKey(x.c); const e = names.get(k) || {name:x.c, total:0}; e.total += x.v; names.set(k, e); }));
+  state.catMonths = asc;
+  const catList = [...names].filter(([,e]) => e.total > 0).sort((a,b) => b[1].total - a[1].total);
+  const esc = t => t.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  $('csel').innerHTML = catList.map(([k,e]) => `<option value="${esc(k)}">${esc(e.name)}</option>`).join('');
+  $('csel').onchange = drawTrend;
   drawCats();
+  drawTrend();
 
   // investimenti
   let ti = 0, tv = 0;
@@ -376,9 +392,57 @@ function drawCats(){
   const top = list.slice(0, 10), rest = list.slice(10).reduce((a,[,v]) => a+v, 0);
   if (rest > 0) top.push(['Altre (' + (list.length-10) + ')', rest]);
   const esc = t => t.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  $('cats').innerHTML = top.map(([c,v]) => `<div class="row"><span class="name" title="${esc(c)}">${esc(c)}</span><span class="track"><span class="fill" style="display:block;width:${Math.max(2, v/Math.max(max,rest)*100)}%"></span></span><span class="amt">${fmt(v)}</span></div>`).join('');
+  $('cats').innerHTML = top.map(([c,v], i) => `<div class="row" ${i < 10 || !rest ? `data-k="${esc(catKey(c))}" style="cursor:pointer" title="Vedi andamento"` : ''}><span class="name" title="${esc(c)}">${esc(c)}</span><span class="track"><span class="fill" style="display:block;width:${Math.max(2, v/Math.max(max,rest)*100)}%"></span></span><span class="amt">${fmt(v)}</span></div>`).join('');
+  $('cats').querySelectorAll('[data-k]').forEach(r => r.onclick = () => {
+    $('csel').value = r.dataset.k; drawTrend();
+    $('csel').closest('.card').scrollIntoView({behavior:'smooth', block:'start'});
+  });
   const inc = s.inc.reduce((a,x) => a+x.v, 0);
   $('cats-note').textContent = `Totale uscite ${fmt(tot)}` + (inc ? ` · entrate ${fmt(inc)}` : '');
+}
+
+function catKey(c){ return String(c).trim().toLowerCase().replace(/\s+/g, ' '); }
+
+function drawTrend(){
+  const key = $('csel').value, ms = state.catMonths || [];
+  if (!key || !ms.length){ $('trend').replaceChildren(); return; }
+  const name = $('csel').selectedOptions[0].textContent;
+  const data = ms.map(s => ({y:s.y, m:s.m, v:s.out.filter(x => catKey(x.c) === key).reduce((a,x) => a+x.v, 0)}));
+  const W = 720, H = 220, L = 40, B = 22, T = 8;
+  const mx = niceMax(Math.max(...data.map(d => d.v)));
+  const avg = data.reduce((a,d) => a+d.v, 0) / data.length;
+  const svg = el('svg', {viewBox:`0 0 ${W} ${H}`, role:'img', 'aria-label':'Spesa mensile per ' + name});
+  for (let i = 0; i <= 5; i++){
+    const y = T + (H-B-T) * (1 - i/5);
+    svg.append(el('line', {x1:L, x2:W, y1:y, y2:y, stroke:'var(--line)'}));
+    const t = el('text', {x:L-6, y:y+4, 'text-anchor':'end'}); t.textContent = kfmt(mx*i/5); svg.append(t);
+  }
+  const step = (W-L) / data.length, bw = Math.max(3, Math.min(22, step*0.7));
+  const every = Math.ceil(data.length / 12);
+  const show = d => { const x = d.v - avg; $('trend-r').innerHTML = `<b>${MESI_L[d.m-1]} ${d.y}</b> · ${name}: ${fmt(d.v)} · <span class="${x<=0?'pos':'neg'}">${sgn(x)}</span> rispetto alla media`; };
+  data.forEach((d, i) => {
+    const x = L + step*i + step/2, h = d.v/mx*(H-B-T);
+    const grp = el('g', {style:'cursor:pointer'});
+    grp.append(el('rect', {x:x-step/2, y:T, width:step, height:H-B-T, fill:'transparent'}));
+    grp.append(el('rect', {x:x-bw/2, y:H-B-h, width:bw, height:h, rx:2, fill:'var(--accent)', opacity: i === data.length-1 ? 1 : .75}));
+    grp.addEventListener('pointerenter', () => show(d)); grp.addEventListener('click', () => show(d));
+    svg.append(grp);
+    const last = data.length-1;
+    if ((i % every === 0 && last - i >= every*0.7) || i === last){ const t = el('text', {x, y:H-6, 'text-anchor':'middle'}); t.textContent = label(d.y, d.m); svg.append(t); }
+  });
+  const ya = T + (H-B-T) * (1 - avg/mx);
+  svg.append(el('line', {x1:L, x2:W, y1:ya, y2:ya, stroke:'var(--warn)', 'stroke-width':1.5, 'stroke-dasharray':'5 4'}));
+  $('trend').replaceChildren(svg);
+  show(data[data.length-1]);
+  // confronto: ultimi 3 mesi vs i 3 precedenti, ultimo anno vs anno prima
+  const sum = a => a.reduce((s,d) => s+d.v, 0);
+  const l3 = sum(data.slice(-3))/3, p3 = sum(data.slice(-6,-3))/3;
+  const l12 = sum(data.slice(-12))/Math.min(12, data.length), p12 = data.length >= 24 ? sum(data.slice(-24,-12))/12 : null;
+  const pct = (a,b) => b ? ` (${a>=b?'+':''}${Math.round((a-b)/b*100)}%)` : '';
+  const maxD = data.reduce((a,d) => d.v > a.v ? d : a, data[0]);
+  $('trend-s').innerHTML = `<span style="color:var(--warn)">- - -</span> media di tutto il periodo ${fmt(avg)}/mese<br>`;
+  $('trend-s').append(`Media ultimi 3 mesi ${fmt(l3)}/mese${pct(l3,p3)} vs i 3 precedenti · media ultimi 12 mesi ${fmt(l12)}/mese`
+    + (p12 != null ? `${pct(l12,p12)} vs i 12 precedenti` : '') + ` · mese più alto: ${label(maxD.y,maxD.m)} (${fmt(maxD.v)})`);
 }
 
 /* ---------- grafici SVG ---------- */
@@ -461,7 +525,7 @@ $('eye').addEventListener('click', () => {
 $('close').addEventListener('click', wipe);
 function wipe(){
   state = null;
-  ['accounts','invest','cats','flow','worth','msel'].forEach(id => $(id).replaceChildren());
+  ['accounts','invest','cats','flow','worth','msel','csel','trend'].forEach(id => $(id).replaceChildren());
   document.querySelectorAll('#dash .sens').forEach(e => { if (!e.children.length) e.textContent = ''; });
   $('dash').classList.add('hidden'); $('start').classList.remove('hidden');
   $('eye').classList.add('hidden'); $('close').classList.add('hidden');
